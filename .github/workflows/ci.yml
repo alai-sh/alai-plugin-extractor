@@ -1,0 +1,138 @@
+name: Test alai-plugin-extractor
+on:
+  push:
+    branches:
+    - main
+
+  pull_request:
+    branches:
+    - main
+
+  release:
+    types:
+    - published
+
+# Jobs get a read-only token unless they ask for more.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sanity:
+    name: run sanity checks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+
+    - name: Run sanity tests
+      run: uv run tox run -e sanity
+
+  build:
+    name: build sdist and wheel
+    needs:
+    - sanity
+
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      with:
+        # The release artifact must not be built from a cache a PR could have written.
+        enable-cache: false
+
+    - name: build sdist and wheel
+      run: uv build
+
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: artifact
+        path: ./dist/*
+
+  test:
+    name: test ${{ matrix.os }} py${{ matrix.python-version }}
+    needs:
+    - build
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - ubuntu-latest
+        - macos-latest
+        python-version:
+        - "3.12"
+        - "3.13"
+        - "3.14"
+        - "3.15"
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+      with:
+        name: artifact
+        path: ./dist
+
+    - name: Test
+      shell: bash
+      run: |
+        set -ex
+
+        uv python install "${PYTHON_VERSION}"
+        uv run tox run \
+            -e "py${PYTHON_VERSION//./}-tests" \
+            --installpkg dist/*.whl
+      env:
+        PYTHON_VERSION: ${{ matrix.python-version }}
+        PYTEST_ADDOPTS: --color=yes --junitxml junit/test-results.xml
+
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: Unit Test Results (${{ matrix.os }} ${{ matrix.python-version }})
+        path: ./junit/test-results.xml
+
+    - name: Upload Coverage Results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: Coverage Results (${{ matrix.os }} ${{ matrix.python-version }})
+        path: ./coverage.xml
+
+  publish:
+    name: publish
+    needs:
+    - test
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/alai-plugin-extractor/
+    permissions:
+      # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write
+
+    steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+      with:
+        name: artifact
+        path: ./dist
+
+    - name: Publish
+      uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
